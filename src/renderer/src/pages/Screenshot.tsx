@@ -158,8 +158,7 @@ export const Screenshot = () => {
     if (!selection || !capturedImage) return
     const blob = await getCroppedBlob()
     const buffer = await blob.arrayBuffer()
-    await window.electron.ipcRenderer.invoke('save-file', new Uint8Array(buffer))
-    window.electron.ipcRenderer.send('close-screenshot')
+    window.electron.ipcRenderer.send('save-file-request', new Uint8Array(buffer))
   }
 
   const handleClipboard = async () => {

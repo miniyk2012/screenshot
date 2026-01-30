@@ -216,6 +216,19 @@ app.whenReady().then(() => {
     return null
   })
 
+  ipcMain.on('save-file-request', async (_event, buffer) => {
+    if (screenshotWindow) {
+      screenshotWindow.close()
+      screenshotWindow = null
+    }
+    const { filePath } = await dialog.showSaveDialog({
+      buttonLabel: 'Save image',
+      defaultPath: `screenshot-${Date.now()}.png`
+    })
+    if (filePath) {
+      fs.writeFileSync(filePath, Buffer.from(buffer))
+    }
+  })
   ipcMain.on('copy-to-clipboard', (_event, buffer) => {
     clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(buffer)))
   })
