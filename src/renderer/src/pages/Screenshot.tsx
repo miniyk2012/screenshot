@@ -171,6 +171,23 @@ export const Screenshot = (): React.JSX.Element => {
     setSelection(null)
   }
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        if (selection) {
+          setIsSelecting(false)
+          setSelection(null)
+        } else {
+          window.electron.ipcRenderer.send('close-screenshot')
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [selection])
+
   return (
     <div
       style={{
