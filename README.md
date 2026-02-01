@@ -1,4 +1,4 @@
-[screenshot tool](./asset/screenshot.png)
+![screenshot tool](./asset/screenshot.png)
 
 1. 这是一款截图工具, 只需要在macos上运行, 最好是typescript编写的, 可以以浏览器应用方式运行.
 2. 功能是支持用鼠标左键选择一块区域, 松开鼠标后弹出一个选择栏, 有4个选项: 取消, 保存到粘贴板, 保存到指定目录, 选中并移动.
