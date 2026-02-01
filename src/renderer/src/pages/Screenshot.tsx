@@ -1,100 +1,73 @@
 import React, { useEffect, useRef, useState } from 'react'
 
-export const Screenshot = () => {
+export const Screenshot = (): React.JSX.Element => {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [stream, setStream] = useState<MediaStream | null>(null)
   const [capturedImage, setCapturedImage] = useState<string | null>(null)
   const [selection, setSelection] = useState<{ x: number; y: number; w: number; h: number } | null>(
     null
   )
   const [isSelecting, setIsSelecting] = useState(false)
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null)
+  const [displayBounds, setDisplayBounds] = useState<{
+    x: number
+    y: number
+    width: number
+    height: number
+  } | null>(null)
+  const [scale, setScale] = useState<{ sx: number; sy: number }>({ sx: 1, sy: 1 })
 
   useEffect(() => {
     // Clear default body styles for transparent window
     document.body.style.background = 'transparent'
     document.body.style.backgroundImage = 'none'
 
-    const getSources = async () => {
-      try {
-        const sources = await window.electron.ipcRenderer.invoke('get-screen-sources')
-        if (!sources || sources.length === 0) {
-          console.warn('No screen sources found. Check permissions.')
-          return
-        }
-        const source = sources[0]
-        if (source) {
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              audio: false,
-              video: {
-                mandatory: {
-                  chromeMediaSource: 'desktop',
-                  chromeMediaSourceId: source.id,
-                  maxWidth: 4000,
-                  maxHeight: 4000
-                }
-              } as any
-            })
-            setStream(stream)
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream
-              videoRef.current.play()
-            }
-          } catch (e) {
-            console.error(e)
+    const handleInitScreenshot = (
+      _event: unknown,
+      payload: { dataUrl: string; bounds: { x: number; y: number; width: number; height: number } }
+    ): void => {
+      const { dataUrl, bounds } = payload
+      setCapturedImage(dataUrl)
+      setDisplayBounds(bounds)
+
+      if (canvasRef.current) {
+        const canvas = canvasRef.current
+        canvas.width = window.innerWidth
+        canvas.height = window.innerHeight
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          const img = new Image()
+          img.onload = (): void => {
+            ctx.drawImage(img, 0, 0, window.innerWidth, window.innerHeight)
+            const sx = img.naturalWidth / window.innerWidth
+            const sy = img.naturalHeight / window.innerHeight
+            setScale({ sx, sy })
+            window.electron.ipcRenderer.send('screenshot-rendered')
           }
+          img.src = dataUrl
         }
-      } catch (e) {
-        console.error('Failed to get sources in renderer:', e)
       }
     }
-    getSources()
+
+    window.electron.ipcRenderer.on('init-screenshot', handleInitScreenshot)
 
     return () => {
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop())
-      }
+      window.electron.ipcRenderer.removeAllListeners('init-screenshot')
     }
   }, [])
 
-  useEffect(() => {
-    if (stream && videoRef.current) {
-      videoRef.current.onloadedmetadata = () => {
-        // Short delay to ensure frame is ready
-        setTimeout(() => {
-          if (!canvasRef.current || !videoRef.current) return
-          const canvas = canvasRef.current
-          const video = videoRef.current
+  // Multi-screen capture is performed in the initial effect above
 
-          // Match window size
-          canvas.width = window.innerWidth
-          canvas.height = window.innerHeight
-
-          const ctx = canvas.getContext('2d')
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-            setCapturedImage(canvas.toDataURL('image/png'))
-            // Stop stream
-            stream.getTracks().forEach((track) => track.stop())
-          }
-        }, 200)
-      }
-    }
-  }, [stream])
-
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>): void => {
     if (!capturedImage) return
     // If clicking on toolbar buttons, don't start selection
     if ((e.target as HTMLElement).tagName === 'BUTTON') return
 
     setIsSelecting(true)
     setStartPos({ x: e.clientX, y: e.clientY })
-    setSelection({ x: e.clientX, y: e.clientY, w: 0, h: 0 })
   }
 
-  const handleMouseMove = (e: React.MouseEvent) => {
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>): void => {
     if (!isSelecting || !startPos) return
     const currentX = e.clientX
     const currentY = e.clientY
@@ -107,11 +80,11 @@ export const Screenshot = () => {
     setSelection({ x, y, w, h })
   }
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (): void => {
     setIsSelecting(false)
   }
 
-  const handleCancel = () => {
+  const handleCancel = (): void => {
     setSelection(null)
     window.electron.ipcRenderer.send('close-screenshot')
   }
@@ -130,17 +103,11 @@ export const Screenshot = () => {
     await new Promise((r) => (img.onload = r))
 
     // Draw cropped area
-    ctx!.drawImage(
-      img,
-      selection!.x,
-      selection!.y,
-      selection!.w,
-      selection!.h,
-      0,
-      0,
-      selection!.w,
-      selection!.h
-    )
+    const sx = Math.round(selection!.x * scale.sx)
+    const sy = Math.round(selection!.y * scale.sy)
+    const sw = Math.round(selection!.w * scale.sx)
+    const sh = Math.round(selection!.h * scale.sy)
+    ctx!.drawImage(img, sx, sy, sw, sh, 0, 0, selection!.w, selection!.h)
 
     return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob!)))
   }
@@ -154,14 +121,14 @@ export const Screenshot = () => {
     })
   }
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<void> => {
     if (!selection || !capturedImage) return
     const blob = await getCroppedBlob()
     const buffer = await blob.arrayBuffer()
     window.electron.ipcRenderer.send('save-file-request', new Uint8Array(buffer))
   }
 
-  const handleClipboard = async () => {
+  const handleClipboard = async (): Promise<void> => {
     if (!selection || !capturedImage) return
     const blob = await getCroppedBlob()
     const buffer = await blob.arrayBuffer()
@@ -169,30 +136,38 @@ export const Screenshot = () => {
     window.electron.ipcRenderer.send('close-screenshot')
   }
 
-  const handleMove = async () => {
-     console.log('Renderer: handleMove called')
-     if(!selection || !capturedImage) {
-         console.warn('Renderer: Missing selection or capturedImage', { selection, hasImage: !!capturedImage })
-         return
-     }
-     
-     try {
-         console.log('Renderer: Generating cropped base64...')
-         const base64 = await getCroppedBase64()
-         console.log('Renderer: Base64 generated, length:', base64.length)
-         
-         console.log('Renderer: Sending pin-screenshot IPC...')
-         window.electron.ipcRenderer.send('pin-screenshot', { 
-             imageDataUrl: base64, 
-             bounds: { x: selection.x, y: selection.y, width: selection.w, height: selection.h } 
-         })
-         console.log('Renderer: IPC sent')
-     } catch (err) {
-         console.error('Renderer: Error in handleMove:', err)
-     }
+  const handleMove = async (): Promise<void> => {
+    console.log('Renderer: handleMove called')
+    if (!selection || !capturedImage) {
+      console.warn('Renderer: Missing selection or capturedImage', {
+        selection,
+        hasImage: !!capturedImage
+      })
+      return
+    }
+
+    try {
+      console.log('Renderer: Generating cropped base64...')
+      const base64 = await getCroppedBase64()
+      console.log('Renderer: Base64 generated, length:', base64.length)
+
+      console.log('Renderer: Sending pin-screenshot IPC...')
+      window.electron.ipcRenderer.send('pin-screenshot', {
+        imageDataUrl: base64,
+        bounds: {
+          x: (displayBounds?.x || 0) + selection.x,
+          y: (displayBounds?.y || 0) + selection.y,
+          width: selection.w,
+          height: selection.h
+        }
+      })
+      console.log('Renderer: IPC sent')
+    } catch (err) {
+      console.error('Renderer: Error in handleMove:', err)
+    }
   }
 
-  const handleReset = () => {
+  const handleReset = (): void => {
     setSelection(null)
   }
 
@@ -217,7 +192,7 @@ export const Screenshot = () => {
       />
 
       {/* Overlay Dimmer via Box Shadow */}
-      {capturedImage && selection && (
+      {capturedImage && selection && selection.w > 0 && selection.h > 0 && (
         <div
           style={{
             position: 'absolute',

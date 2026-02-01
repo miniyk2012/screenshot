@@ -15,46 +15,72 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import fs from 'fs'
 
-let screenshotWindow: BrowserWindow | null = null
+let screenshotWindows: BrowserWindow[] = []
+const currentScreenshotData: Map<string, string> = new Map()
+let mainWindow: BrowserWindow | null = null
 
-function createScreenshotWindow(): void {
-  if (screenshotWindow) return
+function createScreenshotWindows(): void {
+  if (screenshotWindows.length > 0) return
 
-  const primaryDisplay = screen.getPrimaryDisplay()
+  const displays = screen.getAllDisplays()
 
-  // For simplicity, we just cover the primary display or all displays.
-  // Handling multiple displays properly requires one window per display or a giant window.
-  // We will start with primary display.
+  displays.forEach((display) => {
+    const win = new BrowserWindow({
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height,
+      show: false,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      vibrancy: 'under-window',
+      visualEffectState: 'active',
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      hasShadow: false,
+      enableLargerThanScreen: false,
+      fullscreenable: false,
+      webPreferences: {
+        preload: join(__dirname, '../preload/index.js'),
+        sandbox: false
+      }
+    })
 
-  const { width, height } = primaryDisplay.bounds
+    // Keep fully hidden until renderer tells us content is ready
+    win.setOpacity(0)
 
-  screenshotWindow = new BrowserWindow({
-    x: primaryDisplay.bounds.x,
-    y: primaryDisplay.bounds.y,
-    width,
-    height,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    hasShadow: false,
-    enableLargerThanScreen: true,
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+    win.setIgnoreMouseEvents(false)
+
+    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+      win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/#/screenshot`)
+    } else {
+      win.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'screenshot' })
     }
-  })
 
-  screenshotWindow.setIgnoreMouseEvents(false)
+    win.webContents.on('did-finish-load', () => {
+      // Find matching image for this display
+      const displayId = String(display.id)
+      const dataUrl = currentScreenshotData.get(displayId)
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    screenshotWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/#/screenshot`)
-  } else {
-    screenshotWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'screenshot' })
-  }
+      if (dataUrl) {
+        win.webContents.send('init-screenshot', {
+          dataUrl,
+          bounds: display.bounds
+        })
+        // Do NOT show here. Wait until renderer finishes drawing to avoid black flash.
+      }
+    })
 
-  screenshotWindow.on('closed', () => {
-    screenshotWindow = null
+    win.on('closed', () => {
+      // Remove from array
+      screenshotWindows = screenshotWindows.filter((w) => w !== win)
+      if (screenshotWindows.length === 0) {
+        currentScreenshotData.clear()
+      }
+    })
+
+    screenshotWindows.push(win)
   })
 }
 
@@ -97,7 +123,7 @@ function createPinWindow(
 
 function createWindow(): void {
   // Create the browser window.
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 360,
     height: 240,
     show: false,
@@ -109,11 +135,13 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+  const win = mainWindow
+
+  win.on('ready-to-show', () => {
+    win.show()
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
+  win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
@@ -121,10 +149,24 @@ function createWindow(): void {
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  win.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+function closeAllScreenshotWindows(): void {
+  screenshotWindows.forEach((win) => {
+    if (!win.isDestroyed()) {
+      win.close()
+    }
+  })
+  screenshotWindows = []
+  currentScreenshotData.clear()
 }
 
 // This method will be called when Electron has finished
@@ -166,11 +208,19 @@ app.whenReady().then(() => {
         }
       }
 
+      const displays = screen.getAllDisplays()
       const sources = await desktopCapturer.getSources({ types: ['screen'] })
-      return sources.map((source) => ({
-        id: source.id,
-        name: source.name
-      }))
+      return sources.map((source) => {
+        const displayId = (source as unknown as { display_id?: string }).display_id
+        const matched = displays.find((d) => String(d.id) === String(displayId))
+        return {
+          id: source.id,
+          name: source.name,
+          displayId,
+          bounds: matched ? matched.bounds : undefined,
+          scaleFactor: matched ? matched.scaleFactor : undefined
+        }
+      })
     } catch (error) {
       console.error('Failed to get sources:', error)
       return []
@@ -178,12 +228,45 @@ app.whenReady().then(() => {
   })
 
   ipcMain.on('start-screenshot', () => {
-    createScreenshotWindow()
+    // Do not hide the main window to avoid UX of minimization.
+    // Directly request renderer to capture; screenshot windows are created afterwards.
+    mainWindow?.webContents.send('capture-screen-request')
   })
 
+  ipcMain.on(
+    'screen-captured',
+    (_event, capturedScreens: Array<{ displayId: string; dataUrl: string }>) => {
+      currentScreenshotData.clear()
+      capturedScreens.forEach((screen) => {
+        currentScreenshotData.set(screen.displayId, screen.dataUrl)
+      })
+
+      createScreenshotWindows()
+      if (mainWindow) {
+        mainWindow.show()
+      }
+    }
+  )
+
   ipcMain.on('close-screenshot', () => {
-    if (screenshotWindow) {
-      screenshotWindow.close()
+    closeAllScreenshotWindows()
+  })
+
+  ipcMain.on('show-screenshot-window', () => {
+    screenshotWindows.forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.show()
+        win.focus()
+      }
+    })
+  })
+
+  ipcMain.on('screenshot-rendered', (event) => {
+    const w = BrowserWindow.fromWebContents(event.sender)
+    if (w && !w.isDestroyed()) {
+      w.setOpacity(1)
+      w.show()
+      w.focus()
     }
   })
 
@@ -194,14 +277,9 @@ app.whenReady().then(() => {
       bounds
     })
     createPinWindow(imageDataUrl, bounds)
-    if (screenshotWindow) {
-      console.log('Main: Closing screenshot window')
-      screenshotWindow.close()
-      // Force cleanup just in case
-      screenshotWindow = null
-    } else {
-      console.warn('Main: Screenshot window is null, cannot close')
-    }
+
+    // Close all screenshot windows
+    closeAllScreenshotWindows()
   })
 
   ipcMain.handle('save-file', async (_event, buffer) => {
@@ -217,10 +295,8 @@ app.whenReady().then(() => {
   })
 
   ipcMain.on('save-file-request', async (_event, buffer) => {
-    if (screenshotWindow) {
-      screenshotWindow.close()
-      screenshotWindow = null
-    }
+    closeAllScreenshotWindows()
+
     const { filePath } = await dialog.showSaveDialog({
       buttonLabel: 'Save image',
       defaultPath: `screenshot-${Date.now()}.png`
@@ -229,6 +305,7 @@ app.whenReady().then(() => {
       fs.writeFileSync(filePath, Buffer.from(buffer))
     }
   })
+
   ipcMain.on('copy-to-clipboard', (_event, buffer) => {
     clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(buffer)))
   })
@@ -258,6 +335,3 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
-
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.
